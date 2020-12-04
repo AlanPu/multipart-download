@@ -34,3 +34,4 @@ settings.gradle.kts
 .idea/
 
 build/
+src/test/kotlin/LocalTest.kt
