@@ -9,9 +9,10 @@ import java.net.URL
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.Executors
 
 
-class Downloader constructor(var threadCount: Int, var uri: String, var localPath: String) {
+class Downloader constructor(private var threadCount: Int, private var uri: String, private var localPath: String) {
     companion object {
         private val LOGGER: Logger = LoggerFactory.getLogger(Downloader::class.java)
         private const val DEFAULT_BUFFER_SIZE: Int = 8096
@@ -23,12 +24,31 @@ class Downloader constructor(var threadCount: Int, var uri: String, var localPat
 
     fun execute() {
         val url = URL(uri)
-        val contentLenght = getContentLength(url)
+        val contentLength = getContentLength(url)
         createTempFile()
+
+        val service = Executors.newFixedThreadPool(1)
+        latch = CountDownLatch(1)
+        service.execute(DownloadThread(url, 0, contentLength))
+        latch.await()
+        file?.close()
+        service.shutdown()
+
+        renameTempFile()
+    }
+
+    private fun renameTempFile() {
+        val f = File("$localPath.download")
+        try {
+            val s = f.renameTo(File(localPath))
+            LOGGER.debug("Rename result: $s")
+        } catch (e: Exception) {
+            LOGGER.error("Failed to rename file", e)
+        }
     }
 
     private fun createTempFile(): String {
-        val f = File("$localPath.download");
+        val f = File("$localPath.download")
 
         // Create a new temp file if not yet exists
         if (!f.exists()) {
@@ -57,10 +77,9 @@ class Downloader constructor(var threadCount: Int, var uri: String, var localPat
     }
 
     inner class DownloadThread constructor(
-        var url: URL,
-        var startPos: Long,
-        var length: Int,
-        var localFile: RandomAccessFile
+        private var url: URL,
+        private var startPos: Long,
+        private var length: Long
     ) : Runnable {
 
         override fun run() {
@@ -69,16 +88,18 @@ class Downloader constructor(var threadCount: Int, var uri: String, var localPat
             try {
                 val urlConnection: HttpURLConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
                 urlConnection.setRequestProperty("Range", "bytes=" + startPos + "-" + (startPos + length))
-                val bis = BufferedInputStream(urlConnection.getInputStream())
-                var len: Int = 0
-                var offset: Int = 0
+                val bis = BufferedInputStream(urlConnection.inputStream)
+                var len: Int
+                var offset: Long = startPos
 
-                while (bis.readNBytes(buf, offset, length).let {  // while # of bytes read != -1
+                while (bis.readNBytes(buf, 0, DEFAULT_BUFFER_SIZE).let {  // while # of bytes read != -1
                         len = it
-                        it != -1
+                        it <= 0
                     }) {
                     synchronized(lock) {
-                        localFile.write(buf, startPos.toInt(), length)
+                        file?.seek(offset)
+                        file?.write(buf, 0, len)
+                        offset += len
                     }
                 }
                 bis.close()
@@ -90,8 +111,4 @@ class Downloader constructor(var threadCount: Int, var uri: String, var localPat
         }
 
     }
-}
-
-fun main() {
-    val downloader = Downloader(1, "https://web.alanpu.top:19443/content/trace1.data", "/Users/Alan/Desktop/test.txt").execute()
 }
