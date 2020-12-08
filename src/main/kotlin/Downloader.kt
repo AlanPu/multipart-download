@@ -21,6 +21,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     private val lock = Any()
     private lateinit var latch: CountDownLatch
     private var file: RandomAccessFile? = null
+    private var completion: Long = 0
 
     fun execute() {
         val url = URL(uri)
@@ -32,14 +33,25 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         val segmentLength: Long = contentLength / threadCount
         var currentPos: Long = 0
         var remainingLength: Long = contentLength
+
+        // Start a thread to print progress every 1 second
+        service.execute(ProgressPrintThread(contentLength))
+
+        // Start threads to download
         for (i in 0 until threadCount) {
-            service.execute(DownloadThread(url, currentPos, when (i) {
-                in 1 until threadCount -> segmentLength + remainingLength
-                else -> segmentLength
-            }))
+            service.execute(
+                DownloadThread(
+                    url, currentPos, when (i) {
+                        in 1 until threadCount -> segmentLength + remainingLength
+                        else -> segmentLength
+                    }
+                )
+            )
             remainingLength -= segmentLength
             currentPos += segmentLength
         }
+
+        // Wait for all download threads complete, then close resources
         latch.await()
         file?.close()
         service.shutdown()
@@ -92,6 +104,28 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         return contentLength
     }
 
+    /**
+     * Progress printing thread.
+     */
+    inner class ProgressPrintThread constructor(var contentLength: Long) : Runnable {
+        override fun run() {
+            while (true) {
+                var progress: String = String.format("%.2f", ((completion.toFloat() / contentLength) * 100)) + "% completed."
+                print(progress)
+                Thread.sleep(1000)
+
+                // Remove current printed progress from console
+                for (i in progress.indices) {
+                    // Print "\b" will remove the last char printed in console
+                    print("\b")
+                }
+            }
+        }
+    }
+
+    /**
+     * Thread for download.
+     */
     inner class DownloadThread constructor(
         private var url: URL,
         private var startPos: Long,
@@ -116,6 +150,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
                         file?.seek(offset)
                         file?.write(buf, 0, len)
                         offset += len
+                        completion += len
                     }
                 }
                 bis.close()
