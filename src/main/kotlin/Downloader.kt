@@ -27,9 +27,19 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         val contentLength = getContentLength(url)
         createTempFile()
 
-        val service = Executors.newFixedThreadPool(1)
-        latch = CountDownLatch(1)
-        service.execute(DownloadThread(url, 0, contentLength))
+        val service = Executors.newFixedThreadPool(threadCount)
+        latch = CountDownLatch(threadCount)
+        val segmentLength: Long = contentLength / threadCount
+        var currentPos: Long = 0
+        var remainingLength: Long = contentLength
+        for (i in 0 until threadCount) {
+            service.execute(DownloadThread(url, currentPos, when (i) {
+                in 1 until threadCount -> segmentLength + remainingLength
+                else -> segmentLength
+            }))
+            remainingLength -= segmentLength
+            currentPos += segmentLength
+        }
         latch.await()
         file?.close()
         service.shutdown()
@@ -37,8 +47,11 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         renameTempFile()
     }
 
+    /**
+     * Rename temp file to final name, i.e. remove the suffix ".download".
+     */
     private fun renameTempFile() {
-        val f = File("$localPath.download")
+        var f = File("$localPath.download")
         try {
             val s = f.renameTo(File(localPath))
             LOGGER.debug("Rename result: $s")
@@ -47,6 +60,9 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         }
     }
 
+    /**
+     * Create a temp file with name ends with ".download".
+     */
     private fun createTempFile(): String {
         val f = File("$localPath.download")
 
@@ -94,7 +110,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
 
                 while (bis.readNBytes(buf, 0, DEFAULT_BUFFER_SIZE).let {  // while # of bytes read != -1
                         len = it
-                        it <= 0
+                        it > 0
                     }) {
                     synchronized(lock) {
                         file?.seek(offset)
