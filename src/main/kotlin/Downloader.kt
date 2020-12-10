@@ -1,14 +1,14 @@
+import com.google.gson.Gson
+import model.DownloadProgress
+import model.ThreadProgress
 import java.util.concurrent.CountDownLatch
 import org.slf4j.Logger
 
 import org.slf4j.LoggerFactory
-import java.io.RandomAccessFile
+import java.io.*
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URL
-import java.io.BufferedInputStream
-import java.io.File
-import java.io.IOException
 import java.util.concurrent.Executors
 
 
@@ -16,37 +16,48 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     companion object {
         private val LOGGER: Logger = LoggerFactory.getLogger(Downloader::class.java)
         private const val DEFAULT_BUFFER_SIZE: Int = 8096
+        private val gson = Gson()
     }
 
     private val lock = Any()
     private lateinit var latch: CountDownLatch
     private var file: RandomAccessFile? = null
     private var completion: Long = 0
+    private var downloadProgress: DownloadProgress? = null
+    private var progressFile: RandomAccessFile? = null
+    private var isStopped = false
 
     fun execute() {
         val url = URL(uri)
         val contentLength = getContentLength(url)
-        createTempFile()
 
-        val service = Executors.newFixedThreadPool(threadCount)
+        val threadProgress = arrayOfNulls<ThreadProgress>(threadCount)
+        downloadProgress = DownloadProgress(contentLength, "", threadCount, threadProgress)
+
+        createTempFile()
+        progressFile = RandomAccessFile("$localPath.dpg", "rw")
+
         latch = CountDownLatch(threadCount)
+        val service = Executors.newFixedThreadPool(threadCount + 1)
         val segmentLength: Long = contentLength / threadCount
         var currentPos: Long = 0
         var remainingLength: Long = contentLength
 
-        // Start a thread to print progress every 1 second
-        service.execute(ProgressPrintThread(contentLength))
+        // Start a thread to update progress every 1 second
+        downloadProgress?.let {
+            service.execute(ProgressUpdateThread(it))
+        }
 
         // Start threads to download
         for (i in 0 until threadCount) {
-            service.execute(
-                DownloadThread(
-                    url, currentPos, when (i) {
-                        in 1 until threadCount -> segmentLength + remainingLength
-                        else -> segmentLength
-                    }
-                )
-            )
+            val length = when (i) {
+                in 0 until (threadCount - 1) -> segmentLength
+                else -> segmentLength + remainingLength
+            }
+            val endPos = currentPos + length
+            threadProgress[i] =
+                ThreadProgress(i, currentPos, if (endPos > contentLength) contentLength else endPos, currentPos)
+            service.execute(DownloadThread(i, url, currentPos, length))
             remainingLength -= segmentLength
             currentPos += segmentLength
         }
@@ -54,8 +65,9 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         // Wait for all download threads complete, then close resources
         latch.await()
         file?.close()
+        Thread.sleep(2000)
+        isStopped = true
         service.shutdown()
-
         renameTempFile()
     }
 
@@ -63,7 +75,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
      * Rename temp file to final name, i.e. remove the suffix ".download".
      */
     private fun renameTempFile() {
-        var f = File("$localPath.download")
+        val f = File("$localPath.download")
         try {
             val s = f.renameTo(File(localPath))
             LOGGER.debug("Rename result: $s")
@@ -107,15 +119,23 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     /**
      * Progress printing thread.
      */
-    inner class ProgressPrintThread constructor(var contentLength: Long) : Runnable {
+    inner class ProgressUpdateThread constructor(private val downloadProgress: DownloadProgress) : Runnable {
         override fun run() {
-            while (true) {
-                var progress: String = String.format("%.2f", ((completion.toFloat() / contentLength) * 100)) + "% completed."
-                print(progress)
+            while (!isStopped) {
+                val progress = String.format("%.2f%%", ((completion.toFloat() / downloadProgress.contentLength) * 100))
+                downloadProgress.totalProgress = progress
+                progressFile?.apply {
+                    seek(0)
+                    writeBytes(gson.toJson(downloadProgress))
+                }
+
+                val progressInfo = "$progress completed."
+                print(progressInfo)
+
                 Thread.sleep(1000)
 
                 // Remove current printed progress from console
-                for (i in progress.indices) {
+                for (i in progressInfo.indices) {
                     // Print "\b" will remove the last char printed in console
                     print("\b")
                 }
@@ -127,9 +147,10 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
      * Thread for download.
      */
     inner class DownloadThread constructor(
-        private var url: URL,
-        private var startPos: Long,
-        private var length: Long
+        private val index: Int,
+        private val url: URL,
+        private val startPos: Long,
+        private val length: Long
     ) : Runnable {
 
         override fun run() {
@@ -150,6 +171,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
                         file?.seek(offset)
                         file?.write(buf, 0, len)
                         offset += len
+                        downloadProgress?.threads?.get(index)?.currentPos = offset
                         completion += len
                     }
                 }
