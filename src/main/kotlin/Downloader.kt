@@ -209,32 +209,35 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         override fun run() {
             val buf = ByteArray(DEFAULT_BUFFER_SIZE)
 
-            try {
-                val urlConnection: HttpURLConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
-                urlConnection.setRequestProperty("Range", "bytes=" + startPos + "-" + (startPos + length))
-                val bis = BufferedInputStream(urlConnection.inputStream)
-                var len = 0
-                var offset: Long = startPos
+            if (length > 0) {
+                try {
+                    val urlConnection: HttpURLConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
+                    urlConnection.setRequestProperty("Range", "bytes=" + startPos + "-" + (startPos + length))
+                    val bis = BufferedInputStream(urlConnection.inputStream)
+                    var len = 0
+                    var offset: Long = startPos
 
-                while (!isStopped && (bis.readNBytes(buf, 0, DEFAULT_BUFFER_SIZE).let {  // while # of bytes read != -1
-                        len = it
-                        it > 0
-                    })) {
-                    synchronized(lock) {
-                        targetFile?.seek(offset)
-                        targetFile?.write(buf, 0, len)
-                        offset += len
-                        downloadProgress?.threads?.get(index)?.currentPos = offset
-                        completion += len
+                    while (!isStopped && (bis.readNBytes(buf, 0, DEFAULT_BUFFER_SIZE)
+                            .let {  // while # of bytes read != -1
+                                len = it
+                                it > 0
+                            })
+                    ) {
+                        synchronized(lock) {
+                            targetFile?.seek(offset)
+                            targetFile?.write(buf, 0, len)
+                            offset += len
+                            downloadProgress?.threads?.get(index)?.currentPos = offset
+                            completion += len
+                        }
                     }
+                    bis.close()
+                    urlConnection.disconnect()
+                } catch (e: Exception) {
+                    LOGGER.error("Download failed", e)
                 }
-                bis.close()
-                urlConnection.disconnect()
-                latch.countDown()
-            } catch (e: Exception) {
-                LOGGER.error("Download failed", e)
             }
+            latch.countDown()
         }
-
     }
 }
