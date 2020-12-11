@@ -12,7 +12,8 @@ import java.net.URL
 import java.util.concurrent.Executors
 
 
-class Downloader constructor(private var threadCount: Int, private var uri: String, private var localPath: String) {
+class Downloader constructor(private var threadCount: Int, private var uri: String, private var localPath: String):
+    Thread() {
     companion object {
         private val LOGGER: Logger = LoggerFactory.getLogger(Downloader::class.java)
         private const val DEFAULT_BUFFER_SIZE: Int = 8096
@@ -25,9 +26,11 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     private var completion: Long = 0
     private var downloadProgress: DownloadProgress? = null
     private var progressFile: RandomAccessFile? = null
-    private var isStopped = false
 
-    fun execute() {
+    @Volatile
+    var isStopped = false
+
+    override fun run() {
         val url = URL(uri)
         val contentLength = getContentLength(url)
 
@@ -64,11 +67,14 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
 
         // Wait for all download threads complete, then close resources
         latch.await()
-        file?.close()
-        Thread.sleep(2000)
-        isStopped = true
         service.shutdown()
+        file?.close()
+        isStopped = true
+        progressFile?.close()
         renameTempFile()
+
+        // Delete progress log file
+        File("$localPath.dpg").delete()
     }
 
     /**
@@ -105,6 +111,9 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         return f.absolutePath
     }
 
+    /**
+     * Get content length from HTTP header "Content-Length"
+     */
     private fun getContentLength(url: URL): Long {
         val urlConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
         urlConnection.requestMethod = "HEAD"
@@ -122,7 +131,8 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     inner class ProgressUpdateThread constructor(private val downloadProgress: DownloadProgress) : Runnable {
         override fun run() {
             while (!isStopped) {
-                val progress = String.format("%.2f%%", ((completion.toFloat() / downloadProgress.contentLength) * 100))
+                val progress =
+                    String.format("%.2f%%", ((completion.toFloat() / downloadProgress.contentLength) * 100))
                 downloadProgress.totalProgress = progress
                 progressFile?.apply {
                     seek(0)
@@ -160,13 +170,13 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
                 val urlConnection: HttpURLConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
                 urlConnection.setRequestProperty("Range", "bytes=" + startPos + "-" + (startPos + length))
                 val bis = BufferedInputStream(urlConnection.inputStream)
-                var len: Int
+                var len: Int = 0
                 var offset: Long = startPos
 
-                while (bis.readNBytes(buf, 0, DEFAULT_BUFFER_SIZE).let {  // while # of bytes read != -1
+                while (!isStopped && (bis.readNBytes(buf, 0, DEFAULT_BUFFER_SIZE).let {  // while # of bytes read != -1
                         len = it
                         it > 0
-                    }) {
+                    })) {
                     synchronized(lock) {
                         file?.seek(offset)
                         file?.write(buf, 0, len)
