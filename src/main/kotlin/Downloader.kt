@@ -12,7 +12,7 @@ import java.net.URL
 import java.util.concurrent.Executors
 
 
-class Downloader constructor(private var threadCount: Int, private var uri: String, private var localPath: String):
+class Downloader constructor(private var threadCount: Int, private var uri: String, private var localPath: String) :
     Thread() {
     companion object {
         private val LOGGER: Logger = LoggerFactory.getLogger(Downloader::class.java)
@@ -26,6 +26,8 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     private var completion: Long = 0
     private var downloadProgress: DownloadProgress? = null
     private var progressFile: RandomAccessFile? = null
+    private val progressFilePath = "$localPath.dpg"
+    private val tempDownloadFilePath = "$localPath.download"
 
     @Volatile
     var isStopped = false
@@ -38,7 +40,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         downloadProgress = DownloadProgress(contentLength, "", threadCount, threadProgress)
 
         createTempFile()
-        progressFile = RandomAccessFile("$localPath.dpg", "rw")
+        progressFile = RandomAccessFile(progressFilePath, "rw")
 
         latch = CountDownLatch(threadCount)
         val service = Executors.newFixedThreadPool(threadCount + 1)
@@ -53,10 +55,12 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
 
         // Start threads to download
         for (i in 0 until threadCount) {
-            val length = when (i) {
-                in 0 until (threadCount - 1) -> segmentLength
-                else -> segmentLength + remainingLength
-            }
+            val length =
+                when {
+                    threadCount == 1 -> contentLength  // Single thread
+                    i == threadCount - 1 -> segmentLength + remainingLength  // Last thread
+                    else -> segmentLength
+                }
             val endPos = currentPos + length
             threadProgress[i] =
                 ThreadProgress(i, currentPos, if (endPos > contentLength) contentLength else endPos, currentPos)
@@ -70,18 +74,20 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         service.shutdown()
         file?.close()
         isStopped = true
-        progressFile?.close()
         renameTempFile()
 
-        // Delete progress log file
-        File("$localPath.dpg").delete()
+        // If download completed, delete progress log file
+        // Otherwise, i.e. download is explicitly stopped, keep the file
+        if (completion == contentLength) {
+            File(progressFilePath).delete()
+        }
     }
 
     /**
      * Rename temp file to final name, i.e. remove the suffix ".download".
      */
     private fun renameTempFile() {
-        val f = File("$localPath.download")
+        val f = File(tempDownloadFilePath)
         try {
             val s = f.renameTo(File(localPath))
             LOGGER.debug("Rename result: $s")
@@ -94,7 +100,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
      * Create a temp file with name ends with ".download".
      */
     private fun createTempFile(): String {
-        val f = File("$localPath.download")
+        val f = File(tempDownloadFilePath)
 
         // Create a new temp file if not yet exists
         if (!f.exists()) {
@@ -142,7 +148,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
                 val progressInfo = "$progress completed."
                 print(progressInfo)
 
-                Thread.sleep(1000)
+                sleep(1000)
 
                 // Remove current printed progress from console
                 for (i in progressInfo.indices) {
@@ -150,6 +156,9 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
                     print("\b")
                 }
             }
+
+            // Close the file when download threads are stopped
+            progressFile?.close()
         }
     }
 
@@ -170,7 +179,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
                 val urlConnection: HttpURLConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
                 urlConnection.setRequestProperty("Range", "bytes=" + startPos + "-" + (startPos + length))
                 val bis = BufferedInputStream(urlConnection.inputStream)
-                var len: Int = 0
+                var len = 0
                 var offset: Long = startPos
 
                 while (!isStopped && (bis.readNBytes(buf, 0, DEFAULT_BUFFER_SIZE).let {  // while # of bytes read != -1
