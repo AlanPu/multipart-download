@@ -20,11 +20,11 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         private val gson = Gson()
     }
 
-    private val lock = Any()
+    private val fileLock = Any()
+    private val progressLock = Any()
     private lateinit var latch: CountDownLatch
     private var targetFile: RandomAccessFile? = null
-    private var completion: Long = 0
-    private var downloadProgress: DownloadProgress? = null
+    private lateinit var downloadProgress: DownloadProgress
     private var progressFile: RandomAccessFile? = null
     private val progressFilePath = "$localPath.dpg"
     private val tempDownloadFilePath = "$localPath.download"
@@ -38,24 +38,33 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         lateinit var threadProgress: Array<ThreadProgress?>
         var totalProgress = ""
         var remainingLength: Long
-        var isFromResume: Boolean
+        val isFromResume: Boolean
+
+        // Delete it if target file exists already
+        File(localPath).apply {
+            if (this.exists()) {
+                this.delete()
+            }
+        }
+
+        var completion: Long = 0
 
         // If progress file exists, read the meta data from file
         if (File(progressFilePath).exists()) {
-            BufferedReader(FileReader(progressFilePath)).let {
-                val json = it.readLine()
+            BufferedReader(FileReader(progressFilePath)).let { reader ->
+                val json = reader.readLine()
                 gson.fromJson(json, DownloadProgress::class.java).let {
                     contentLength = it.contentLength
                     threadCount = it.threadCount
                     threadProgress = it.threads
-                    completion = it.completion
                     totalProgress = it.totalProgress
-                    remainingLength = contentLength - completion
+                    remainingLength = contentLength - it.completion
+                    completion = it.completion
                 }
-                it.close()
+                reader.close()
             }
             isFromResume = true
-        } else {
+        } else {  // Otherwise initialize with initial values
             contentLength = getContentLength(url)
             threadProgress = arrayOfNulls(threadCount)
             createTempFile()
@@ -73,7 +82,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         var currentPos: Long = 0
 
         // Start a thread to update progress every 1 second
-        downloadProgress?.let {
+        downloadProgress.let {
             service.execute(ProgressUpdateThread(it))
         }
 
@@ -107,11 +116,11 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         targetFile?.close()
         sleep(1500)  // Wait for progress log file to complete
         isStopped = true
-        renameTempFile()
 
-        // If download completed, delete progress log file
-        // Otherwise, i.e. download is explicitly stopped, keep the file
-        if (completion == contentLength) {
+        // If download completed, rename temp file and delete progress log file
+        // Otherwise, i.e. download is explicitly stopped, keep the files
+        if (downloadProgress.completion == contentLength) {
+            renameTempFile()
             File(progressFilePath).delete()
         }
     }
@@ -170,15 +179,19 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     inner class ProgressUpdateThread constructor(private val downloadProgress: DownloadProgress) : Runnable {
         override fun run() {
             while (!isStopped) {
-                val progress =
-                    String.format("%.2f%%", ((completion.toFloat() / downloadProgress.contentLength) * 100))
-                downloadProgress.totalProgress = progress
-                downloadProgress.completion = completion
-                progressFile?.apply {
-                    seek(0)
-                    writeBytes(gson.toJson(downloadProgress))
+                val progress: String
+                synchronized(progressLock) {
+                    progress =
+                        String.format(
+                            "%.2f%%",
+                            ((downloadProgress.completion.toFloat() / downloadProgress.contentLength) * 100)
+                        )
+                    downloadProgress.totalProgress = progress
+                    progressFile?.apply {
+                        seek(0)
+                        writeBytes(gson.toJson(downloadProgress))
+                    }
                 }
-
                 val progressInfo = "$progress completed."
                 print(progressInfo)
 
@@ -209,10 +222,11 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         override fun run() {
             val buf = ByteArray(DEFAULT_BUFFER_SIZE)
 
+            // Only resume the download if the resumed task has not yet completed
             if (length > 0) {
                 try {
                     val urlConnection: HttpURLConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
-                    urlConnection.setRequestProperty("Range", "bytes=" + startPos + "-" + (startPos + length))
+                    urlConnection.setRequestProperty("Range", "bytes=" + startPos + "-" + (startPos + length - 1))
                     val bis = BufferedInputStream(urlConnection.inputStream)
                     var len = 0
                     var offset: Long = startPos
@@ -223,12 +237,14 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
                                 it > 0
                             })
                     ) {
-                        synchronized(lock) {
+                        synchronized(fileLock) {
                             targetFile?.seek(offset)
                             targetFile?.write(buf, 0, len)
-                            offset += len
-                            downloadProgress?.threads?.get(index)?.currentPos = offset
-                            completion += len
+                        }
+                        offset += len
+                        synchronized(progressLock) {
+                            downloadProgress.threads[index]?.currentPos = offset
+                            downloadProgress.completion += len
                         }
                     }
                     bis.close()
