@@ -67,7 +67,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         } else {  // Otherwise initialize with initial values
             contentLength = getContentLength(url)
             threadProgress = arrayOfNulls(threadCount)
-            createTempFile()
+            createTempFile(contentLength)
             remainingLength = contentLength
             isFromResume = false
         }
@@ -141,7 +141,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     /**
      * Create a temp file with name ends with ".download".
      */
-    private fun createTempFile(): String {
+    private fun createTempFile(length: Long): String {
         val f = File(tempDownloadFilePath)
 
         // Create a new temp file if not yet exists
@@ -155,6 +155,17 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
         }
 
         targetFile = RandomAccessFile(f, "rw")
+        var offset = 0L
+        var len = length
+        val bytes = ByteArray(DEFAULT_BUFFER_SIZE) { 0x00 }
+        while (len > 0) {
+            targetFile?.seek(offset)
+            targetFile?.write(bytes, 0, when {
+                length > DEFAULT_BUFFER_SIZE -> DEFAULT_BUFFER_SIZE
+                else -> len.toInt()
+            })
+            len -= DEFAULT_BUFFER_SIZE
+        }
 
         return f.absolutePath
     }
