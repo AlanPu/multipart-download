@@ -140,7 +140,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     }
 
     /**
-     * Create a temp file with name ends with ".download".
+     * Create a temp file with name ends with ".download", and pre-fill the file with "0x00" to target size.
      */
     private fun createTempFile(length: Long): String {
         val f = File(tempDownloadFilePath)
@@ -170,21 +170,6 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
             it.flush()
             it.close()
         }
-
-//        targetFile = RandomAccessFile(f, "rw")
-//        var offset = 0L
-//        var len = length
-//        val bytes = ByteArray(DEFAULT_BUFFER_SIZE) { 0x00 }
-//        while (len > 0) {
-//            targetFile?.seek(offset)
-//            targetFile?.write(bytes, 0, when {
-//                len > DEFAULT_BUFFER_SIZE -> DEFAULT_BUFFER_SIZE
-//                else -> len.toInt()
-//            })
-//            offset += DEFAULT_BUFFER_SIZE
-//            len -= DEFAULT_BUFFER_SIZE
-//        }
-//        targetFile?.close()
 
         return f.absolutePath
     }
