@@ -72,6 +72,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
             isFromResume = false
         }
 
+        targetFile = RandomAccessFile(tempDownloadFilePath, "rw")
         downloadProgress = DownloadProgress(contentLength, completion, totalProgress, threadCount, threadProgress)
 
         progressFile = RandomAccessFile(progressFilePath, "rw")
@@ -154,18 +155,36 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
             }
         }
 
-        targetFile = RandomAccessFile(f, "rw")
-        var offset = 0L
-        var len = length
-        val bytes = ByteArray(DEFAULT_BUFFER_SIZE) { 0x00 }
-        while (len > 0) {
-            targetFile?.seek(offset)
-            targetFile?.write(bytes, 0, when {
-                length > DEFAULT_BUFFER_SIZE -> DEFAULT_BUFFER_SIZE
-                else -> len.toInt()
-            })
-            len -= DEFAULT_BUFFER_SIZE
+        BufferedOutputStream(FileOutputStream(f)).let{
+            var offset = 0L
+            var len = length
+            val bytes = ByteArray(DEFAULT_BUFFER_SIZE) { 0x00 }
+            while (len > 0) {
+                it.write(bytes, 0, when {
+                    len > DEFAULT_BUFFER_SIZE -> DEFAULT_BUFFER_SIZE
+                    else -> len.toInt()
+                })
+                offset += DEFAULT_BUFFER_SIZE
+                len -= DEFAULT_BUFFER_SIZE
+            }
+            it.flush()
+            it.close()
         }
+
+//        targetFile = RandomAccessFile(f, "rw")
+//        var offset = 0L
+//        var len = length
+//        val bytes = ByteArray(DEFAULT_BUFFER_SIZE) { 0x00 }
+//        while (len > 0) {
+//            targetFile?.seek(offset)
+//            targetFile?.write(bytes, 0, when {
+//                len > DEFAULT_BUFFER_SIZE -> DEFAULT_BUFFER_SIZE
+//                else -> len.toInt()
+//            })
+//            offset += DEFAULT_BUFFER_SIZE
+//            len -= DEFAULT_BUFFER_SIZE
+//        }
+//        targetFile?.close()
 
         return f.absolutePath
     }
