@@ -9,6 +9,7 @@ import java.io.*
 import java.net.HttpURLConnection
 import java.net.Proxy
 import java.net.URL
+import java.text.DecimalFormat
 import java.util.concurrent.Executors
 
 
@@ -70,6 +71,14 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
             createTempFile(contentLength)
             remainingLength = contentLength
             isFromResume = false
+        }
+
+        if (contentLength == -1L) {
+            Executors.newSingleThreadExecutor().let {
+                it.execute(NoResumeDownloadThread(url))
+                it.shutdown()
+            }
+            return
         }
 
         targetFile = RandomAccessFile(tempDownloadFilePath, "rw")
@@ -155,15 +164,17 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
             }
         }
 
-        BufferedOutputStream(FileOutputStream(f)).let{
+        BufferedOutputStream(FileOutputStream(f)).let {
             var offset = 0L
             var len = length
             val bytes = ByteArray(DEFAULT_BUFFER_SIZE) { 0x00 }
             while (len > 0) {
-                it.write(bytes, 0, when {
-                    len > DEFAULT_BUFFER_SIZE -> DEFAULT_BUFFER_SIZE
-                    else -> len.toInt()
-                })
+                it.write(
+                    bytes, 0, when {
+                        len > DEFAULT_BUFFER_SIZE -> DEFAULT_BUFFER_SIZE
+                        else -> len.toInt()
+                    }
+                )
                 offset += DEFAULT_BUFFER_SIZE
                 len -= DEFAULT_BUFFER_SIZE
             }
@@ -180,7 +191,7 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
     private fun getContentLength(url: URL): Long {
         val urlConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
         urlConnection.requestMethod = "HEAD"
-        val contentLength: Long = urlConnection.getHeaderField("Content-Length").toLong()
+        val contentLength: Long = urlConnection.getHeaderField("Content-Length")?.toLong() ?: -1
         if (LOGGER.isDebugEnabled) {
             LOGGER.debug("Content length: $contentLength bytes")
         }
@@ -222,6 +233,41 @@ class Downloader constructor(private var threadCount: Int, private var uri: Stri
             // Close the file when download threads are stopped
             progressFile?.close()
         }
+    }
+
+    inner class NoResumeDownloadThread constructor(
+        private val url: URL
+    ) : Runnable {
+        override fun run() {
+            val buf = ByteArray(DEFAULT_BUFFER_SIZE)
+            val urlConnection: HttpURLConnection = url.openConnection(Proxy.NO_PROXY) as HttpURLConnection
+            val bis = BufferedInputStream(urlConnection.inputStream)
+            val bos = BufferedOutputStream(FileOutputStream(tempDownloadFilePath))
+
+            var len: Int
+            var downloadedLength = 0
+            while (bis.readNBytes(buf, 0, DEFAULT_BUFFER_SIZE)
+                    .let {  // while # of bytes read != -1
+                        len = it
+                        it > 0
+                    }
+            ) {
+                bos.write(buf, 0, len)
+
+                val progressInfo = DecimalFormat("#,###").format(downloadedLength) + " bytes downloaded."
+                // Remove current printed progress from console
+                for (i in progressInfo.indices) {
+                    // Print "\b" will remove the last char printed in console
+                    print("\b")
+                }
+                downloadedLength += len
+                print(progressInfo)
+            }
+            bos.flush()
+            bos.close()
+            renameTempFile()
+        }
+
     }
 
     /**
