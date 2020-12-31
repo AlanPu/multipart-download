@@ -1,3 +1,3 @@
 # multipart-download
 
-断点续传多线程下载
+A multipart download example written in Kotlin, with resume from break point feature.
